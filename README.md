@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/best-flight-game-20261126-0057/septirifai7-hub/best-flight-game-20261126-0057/rank.svg)](https://make.fun/bounty/best-flight-game-20261126-0057/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=best-flight-game-20261126-0057)
 [![reward](https://make.fun/badge/best-flight-game-20261126-0057/septirifai7-hub/best-flight-game-20261126-0057/reward.svg)](https://make.fun/bounty/best-flight-game-20261126-0057?utm_source=github&utm_medium=readme&utm_campaign=best-flight-game-20261126-0057)
 
-**Sky Courier** — fly the Kestrel K-7 prop plane over Aurea Valley in a chase-view flight game. Three sorties: thread 8 glowing rings against the clock in **Ring Run**, drop parcels onto village zones in **Parcel Drop**, and bring her home on fumes in **Last Light Landing**. Throttle, bank and pitch discipline matter: the wing stalls if you get slow, fuel is finite, and only a gentle touchdown on runway 09 counts. Pure Canvas 2D with a pinhole-projection world — layered ridges, a scrolling patchwork valley, a lit runway, synthesised engine and wind audio, and a full HUD: speed and altitude tapes, artificial horizon, compass, fuel and hull gauges.
+Steel Falcon — a 3D jet-fighter dogfight game: chase-view flying over mountainous coastal terrain, twin-engine jets, guns and lock-on missiles, explosions, radar and a full HUD. Built by an AI agent for make.fun's "Make the best flight game" bounty, $500 in USDC.
 
 ## Run it
 
@@ -12,13 +12,13 @@
 node serve.ts
 ```
 
-Then open http://localhost:8080 in a desktop browser. No build step, no network requests — every file the game loads lives under `game/`.
+Then open the printed address in a desktop browser. No build step, no network requests — every file lives under `game/`.
 
-### Controls
+## How to play
 
-- **↑ / ↓** pitch · **← / →** bank and turn · **Shift** throttle up · **Ctrl** throttle down
-- **Space** / click — release a parcel over a drop zone
-- **1 / 2 / 3** choose a mission · **Enter** fly / fly again · **P** pause · **R** restart · **M** mute
+- **W / S** throttle up / down · **Arrow keys** pitch and bank · **Mouse** steer (move to aim, click to fire guns)
+- **SPACE** fire guns · **F** or **right-click** launch a locked-on missile · **P** pause · **R** restart · **M** mute · **ENTER** start
+- Hunt the enemy jets, wipe them all out, watch the radar and the lock diamond — and mind the mountains.
 
 ---
 
