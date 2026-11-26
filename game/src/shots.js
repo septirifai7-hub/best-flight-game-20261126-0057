@@ -1,105 +1,117 @@
-// Deterministic screenshot poses. A shot freezes the game in one
-// composed state — same seed, same frame, every time — and renders it
-// with the game's own renderers, so the screenshots are real renders
-// of the game's code, not mock-ups.
-import { createWorld } from './terrain.js';
-import { buildMissionObjects } from './missions.js';
-import { createPlane } from './plane.js';
-import { MISSIONS } from './config.js';
+// Deterministic screenshot poses for Steel Falcon. The game reads
+// ?shot=<name>&seed=<n> and, when a shot is requested, arranges a fixed
+// scene, runs a few frames, then sets window.__shotReady so the capture
+// tool knows the frame is settled. Poses never change for a given seed.
 
-// Put the game in the named pose and freeze it (the main loop then
-// renders without advancing the simulation).
-export function applyShot(g, shot, seed = 7) {
-  g.seed = seed;
+import { v3, dirFromYawPitch } from './math.js';
+import { RUNWAY } from './terrain.js';
+
+export function parseShot() {
+  const q = new URLSearchParams(window.location.search);
+  const shot = q.get('shot');
+  const seed = Number(q.get('seed') || 7);
+  return { shot, seed: Number.isFinite(seed) ? seed : 7 };
+}
+
+// Arrange the world for a named shot. Returns a camera override or null
+// (null = normal chase camera).
+export function applyShot(world, shot, sounds) {
+  const p = world.player;
+  if (shot === 'cover') {
+    // Dogfight mid-action: airborne, banking toward an enemy 250 m ahead
+    // along the player's nose, a missile in flight and an explosion
+    // blooming beside the enemy.
+    world.state = 'flying';
+    p.pos = v3(400, 620, 1800);
+    p.yaw = 2.6; p.pitch = 0.06; p.roll = -0.45;
+    p.speed = 260; p.throttle = 0.9; p.onGround = false;
+    const e = world.enemies[0];
+    e.pos = v3(271, 635, 2014);
+    e.yaw = 2.6; e.pitch = 0; e.alive = true; e.hp = 40;
+    world.lockTarget = e;
+    world.lockTime = 1.5;
+    world.missiles.push({
+      pos: v3(330, 625, 1900),
+      vel: [-196, 23, 326], target: e, life: 0.4, maxLife: 9,
+      friendly: true, trail: trailLine(v3(330, 625, 1900), v3(392, 620, 1810), 24),
+    });
+    world.particles.push({
+      pos: v3(300, 642, 2024), vel: [0, 6, 0], life: 0.25, maxLife: 1.4,
+      size: 5, colour: [0.85, 0.32, 0.08], smoke: false,
+    });
+    world.particles.push({
+      pos: v3(312, 656, 2032), vel: [0, 8, 0], life: 0.15, maxLife: 2.6,
+      size: 7, colour: [0.25, 0.24, 0.23], smoke: true,
+    });
+    world.score = 1250;
+    world.kills = 2;
+    return null;
+  }
   if (shot === 'title') {
-    g.phase = 'title';
-    g.selectedMission = 0;
-    g.mission = MISSIONS[0];
-    g.timeOfDay = 'dawn';
-    g.time = 14; // fixed scene clock: sun, clouds and ridges sit still
-    g.world = createWorld(seed);
-    g.objects = null;
-    g.plane = null;
-    return;
+    // Title screen over the airbase: jet parked on the runway, seen from
+    // a low three-quarter angle off the grass to the left — the strip
+    // recedes diagonally, hangars and mountains behind, no dark slab
+    // filling the frame.
+    world.state = 'menu';
+    p.pos = v3(RUNWAY.x, 28, RUNWAY.z);
+    p.yaw = RUNWAY.heading; p.pitch = 0; p.roll = 0;
+    p.speed = 0; p.onGround = true;
+    const fwd = dirFromYawPitch(p.yaw, 0);
+    const right = [Math.cos(p.yaw), 0, -Math.sin(p.yaw)];
+    const camPos = [
+      p.pos[0] - fwd[0] * 30 - right[0] * 45,
+      p.pos[1] + 13,
+      p.pos[2] - fwd[2] * 30 - right[2] * 45,
+    ];
+    return { pos: camPos, target: [p.pos[0], p.pos[1] + 14, p.pos[2]], up: [0, 1, 0] };
   }
-
-  const missionIndex = shot === 'drop' ? 1 : shot === 'landing' ? 2 : 0;
-  const mission = MISSIONS[missionIndex];
-  g.selectedMission = missionIndex;
-  g.mission = mission;
-  g.timeOfDay = mission.timeOfDay;
-  g.world = createWorld(seed);
-  g.objects = buildMissionObjects(mission, seed);
-  g.plane = createPlane(mission);
-  g.objects.nextRing = g.objects.rings[0] || null;
-  g.phase = 'flying';
-  g.score = shot === 'flight' ? 350 : shot === 'drop' ? 520 : 150;
-  g.ringsHit = shot === 'flight' ? 3 : shot === 'drop' ? 0 : 0;
-  g.ringsTotal = g.objects.rings.length;
-  g.dropsHit = shot === 'drop' ? 1 : 0;
-  g.dropsTotal = g.objects.dropZones.length;
-  g.parcelsLeft = g.dropsTotal - g.dropsHit;
-  g.elapsed = shot === 'flight' ? 74 : shot === 'drop' ? 96 : 41;
-  g.time = 8;
-  g.popups = [];
-  g.message = '';
-  const p = g.plane;
-
-  if (shot === 'flight') {
-    // Mid-course: banking gently toward the next ring, 260 m out.
-    p.airborne = true; p.onGround = false;
-    p.alt = 285; p.speed = 66; p.throttle = 0.62;
-    p.heading = 0.04; p.bank = 0.3; p.pitch = 0.03;
-    p.distanceFlown = 1250;
-    p.fuel = 71;
-    const r0 = g.objects.rings[0];
-    const r1 = g.objects.rings[1];
-    const r2 = g.objects.rings[2];
-    if (r0) r0.done = true;
-    if (r1) r1.done = true;
-    if (r2) r2.done = true;
-    // Rings 1–3 are already threaded; ring 4 waits 260 m ahead.
-    const r3 = g.objects.rings[3];
-    if (r3) { r3.x = 26; r3.y = 292; r3.z = 260; }
-    const r4 = g.objects.rings[4];
-    if (r4) { r4.x = -90; r4.y = 330; r4.z = 720; }
-    const r5 = g.objects.rings[5];
-    if (r5) { r5.x = 120; r5.y = 250; r5.z = 1250; }
-    g.objects.nextRing = r3 || null;
-    g.objects.takeoff.z = -1350; // the take-off strip is far behind now
-    g.objectiveText = 'Thread ring 4 of 8';
-    g.guideAngle = 0.12;
-    g.guideLabel = 'RING 4 · 260m';
-  } else if (shot === 'drop') {
-    // Over the second drop zone, a parcel already falling away below.
-    p.airborne = true; p.onGround = false;
-    p.alt = 300; p.speed = 58; p.throttle = 0.55;
-    p.heading = -0.03; p.bank = -0.18; p.pitch = 0.02;
-    p.distanceFlown = 2100;
-    p.fuel = 64;
-    const dz = g.objects.dropZones[1] || g.objects.dropZones[0];
-    if (dz) { dz.x = -14; dz.z = 190; }
-    g.objects.parcels = [{ x: -52, y: 270, z: 200, zone: 1, scored: false }];
-    g.objects.takeoff.z = -2200; // the take-off strip is far behind now
-    g.objectiveText = 'Drop zone 2 of 3 — press SPACE overhead';
-    g.guideAngle = -0.08;
-    g.guideLabel = 'DROP ZONE · 190m';
-  } else if (shot === 'landing') {
-    // Final approach at dusk: gear down, low fuel, runway 09 ahead.
-    // Well right of the centreline and turning back toward it, so the
-    // strip reads as a diagonal band beside the plane, not behind it.
-    p.airborne = true; p.onGround = false;
-    p.alt = 58; p.speed = 52; p.throttle = 0.34;
-    p.heading = -0.09; p.bank = 0.22; p.pitch = 0.06;
-    p.x = 130;
-    p.distanceFlown = 1480;
-    p.fuel = 11;
-    p.gearDown = true;
-    g.objects.runway.z = 420;
-    g.objects.takeoff.z = -1580; // the take-off strip is far behind now
-    g.objectiveText = 'Land on runway 09  ·  LOW FUEL';
-    g.guideAngle = 0.02;
-    g.guideLabel = 'RUNWAY 09 · 420m';
+  if (shot === 'missile') {
+    // Missile launch: player low over the valley, missile just away with a
+    // long smoke trail, enemy 400 m ahead in the lock diamond.
+    world.state = 'flying';
+    p.pos = v3(-900, 480, 2600);
+    p.yaw = 3.4; p.pitch = 0.02; p.roll = 0.18;
+    p.speed = 290; p.throttle = 1; p.onGround = false;
+    const e = world.enemies[1];
+    e.pos = v3(-828, 486, 2870);
+    e.yaw = 3.4; e.alive = true; e.hp = 100;
+    world.lockTarget = e;
+    world.lockTime = 2;
+    // Missile offset to the right of the flight path so it is clearly
+    // visible beside the jet instead of hidden behind it.
+    const from = v3(-909, 481, 2664);
+    world.missiles.push({
+      pos: from,
+      vel: [146, 9, 371], target: e, life: 0.8, maxLife: 9,
+      friendly: true, trail: trailLine(from, v3(-903, 480, 2609), 24),
+    });
+    world.score = 500;
+    world.kills = 1;
+    return null;
   }
-  g.shotFrozen = true;
+  if (shot === 'runway') {
+    // Final approach: 380 m out, 80 m above the threshold, the runway
+    // strip and the airbase filling the lower frame, mountains behind.
+    world.state = 'flying';
+    p.pos = v3(RUNWAY.x + 130, 108, RUNWAY.z + 357);
+    p.yaw = RUNWAY.heading; p.pitch = -0.05; p.roll = 0;
+    p.speed = 120; p.throttle = 0.35; p.onGround = false;
+    world.score = 750;
+    world.kills = 1;
+    return null;
+  }
+  return null;
+}
+
+function trailLine(a, b, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    out.push([
+      a[0] + (b[0] - a[0]) * t,
+      a[1] + (b[1] - a[1]) * t,
+      a[2] + (b[2] - a[2]) * t,
+    ]);
+  }
+  return out;
 }

@@ -1,251 +1,379 @@
-// HUD and screens: instruments, compass, mission banners, warnings,
-// title / briefing / results. One job: everything drawn on top of the
-// scene, in screen space, never rotated with the world.
-import { CONFIG } from './config.js';
-import { clamp } from './random.js';
+// HUD for Steel Falcon: a 2D canvas overlay on top of the WebGL view.
+// Speed and altitude tapes, compass strip, artificial horizon bar, radar,
+// crosshair with lock diamond, throttle/ammo/score readouts, warnings and
+// the title / pause / game-over screens. All drawn fresh each frame.
 
-const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+import { clamp, v3sub, v3len, v3norm, v3dot, dirFromYawPitch } from './math.js';
+import { RUNWAY } from './terrain.js';
 
-function panel(ctx, x, y, w, h, alpha = 0.55) {
-  ctx.fillStyle = `rgba(8, 16, 32, ${alpha})`;
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 10);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.16)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-}
-
-function text(ctx, s, x, y, size, color, align = 'left', bold = true) {
-  ctx.fillStyle = color;
-  ctx.font = `${bold ? '700' : '400'} ${size}px ${FONT}`;
-  ctx.textAlign = align;
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillText(s, x, y);
-}
-
-// Vertical tape (speed left, altitude right) with a centre readout.
-function tape(ctx, x, y, h, value, step, unit, label, format) {
-  panel(ctx, x - 34, y, 68, h, 0.5);
-  text(ctx, label, x, y - 8, 11, '#9fd8ff', 'center');
-  ctx.save();
-  ctx.beginPath(); ctx.rect(x - 34, y, 68, h); ctx.clip();
-  const mid = y + h / 2;
-  const pxPer = h / (step * 6);
-  const base = Math.floor(value / step) * step;
-  for (let v = base - step * 3; v <= base + step * 3; v += step) {
-    const yy = mid - (v - value) * pxPer;
-    if (yy < y + 4 || yy > y + h - 4) continue;
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.beginPath(); ctx.moveTo(x - 12, yy); ctx.lineTo(x + 12, yy); ctx.stroke();
-    text(ctx, String(v), x + (v === base ? 0 : 0), yy + 4, 11, v === base ? '#fff' : '#cfe6ff', 'center', v === base);
+export class Hud {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
   }
-  ctx.restore();
-  // Centre readout box.
-  ctx.fillStyle = '#ffb020';
-  ctx.beginPath(); ctx.roundRect(x - 32, mid - 13, 64, 26, 5); ctx.fill();
-  text(ctx, format(value), x, mid + 5, 14, '#1a1206', 'center');
-  text(ctx, unit, x, y + h + 14, 10, '#9fd8ff', 'center', false);
-}
 
-export function drawHUD(ctx, g, w, h) {
-  const p = g.plane;
-  const kt = Math.round(p.speed * 1.94384);
-  const altFt = Math.round(p.alt * 3.28084);
-  const hdg = Math.round(((p.heading * 180) / Math.PI % 360 + 360) % 360);
+  resize(w, h) {
+    this.canvas.width = w;
+    this.canvas.height = h;
+  }
 
-  // Artificial horizon: a small round gauge, top centre.
-  const ax = w / 2, ay = 66, ar = 34;
-  ctx.save();
-  ctx.beginPath(); ctx.arc(ax, ay, ar, 0, Math.PI * 2); ctx.clip();
-  ctx.translate(ax, ay);
-  ctx.rotate(-p.bank * 0.7);
-  ctx.translate(0, p.pitch * 120);
-  ctx.fillStyle = '#3f7ec2'; ctx.fillRect(-ar, -ar * 2, ar * 2, ar * 2);
-  ctx.fillStyle = '#7a5a34'; ctx.fillRect(-ar, 0, ar * 2, ar * 2);
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(-ar, 0); ctx.lineTo(ar, 0); ctx.stroke();
-  ctx.restore();
-  ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(ax, ay, ar, 0, Math.PI * 2); ctx.stroke();
-  ctx.fillStyle = '#ffb020';
-  ctx.beginPath(); ctx.moveTo(ax - 8, ay); ctx.lineTo(ax + 8, ay); ctx.lineTo(ax, ay + 5); ctx.closePath(); ctx.fill();
-  text(ctx, 'HDG ' + String(hdg).padStart(3, '0') + '°', ax, ay + ar + 18, 13, '#fff', 'center');
+  draw(world, hs, cam, w, h) {
+    const c = this.ctx;
+    c.clearRect(0, 0, w, h);
+    c.save();
+    if (hs.state === 'menu') { this.drawMenu(world, hs, w, h); c.restore(); return; }
+    if (hs.state === 'over' || hs.state === 'win') {
+      this.drawWorldOverlay(world, hs, cam, w, h, true);
+      this.drawEnd(world, hs, w, h);
+      c.restore();
+      return;
+    }
+    this.drawWorldOverlay(world, hs, cam, w, h, false);
+    if (hs.state === 'paused') this.drawPaused(w, h);
+    c.restore();
+  }
 
-  // Speed tape (left) and altitude tape (right), below the top panels.
-  tape(ctx, 62, 150, 210, kt, 20, 'KT', 'SPEED', (v) => String(Math.round(v)));
-  tape(ctx, w - 62, 150, 210, altFt, 100, 'FT', 'ALT', (v) => String(Math.round(v)));
+  // --- in-world overlay: crosshair, tapes, compass, radar, warnings ---
+  drawWorldOverlay(world, hs, cam, w, h, dim) {
+    const c = this.ctx;
+    if (dim) { c.fillStyle = 'rgba(4, 10, 18, 0.45)'; c.fillRect(0, 0, w, h); }
+    const cx = w / 2, cy = h / 2;
 
-  // Compass strip along the bottom.
-  const cy = h - 26;
-  panel(ctx, w / 2 - 260, cy - 16, 520, 32, 0.5);
-  ctx.save();
-  ctx.beginPath(); ctx.rect(w / 2 - 260, cy - 16, 520, 32); ctx.clip();
-  for (let d = -60; d <= 60; d += 5) {
-    const deg = ((hdg + d) % 360 + 360) % 360;
-    const x = w / 2 + d * 4.2;
-    ctx.strokeStyle = d === 0 ? '#ffb020' : 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = d === 0 ? 2.5 : 1;
-    ctx.beginPath(); ctx.moveTo(x, cy - 10); ctx.lineTo(x, cy + (d % 30 === 0 ? 10 : 4)); ctx.stroke();
-    if (d % 30 === 0) {
-      const label = { 0: 'N', 90: 'E', 180: 'S', 270: 'W' }[deg] ?? String(deg).padStart(3, '0');
-      text(ctx, label, x, cy + 14, 10, d === 0 ? '#ffb020' : '#dfeeff', 'center');
+    // Hit flash vignette.
+    if (hs.hitFlash > 0) {
+      c.fillStyle = `rgba(255, 30, 20, ${0.22 * hs.hitFlash})`;
+      c.fillRect(0, 0, w, h);
+    }
+
+    // Crosshair.
+    c.strokeStyle = '#93d8a8';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.arc(cx, cy, 14, 0, Math.PI * 2);
+    c.moveTo(cx - 26, cy); c.lineTo(cx - 10, cy);
+    c.moveTo(cx + 10, cy); c.lineTo(cx + 26, cy);
+    c.moveTo(cx, cy - 26); c.lineTo(cx, cy - 10);
+    c.moveTo(cx, cy + 10); c.lineTo(cx, cy + 26);
+    c.stroke();
+    c.fillStyle = '#93d8a8';
+    c.beginPath(); c.arc(cx, cy, 2.5, 0, Math.PI * 2); c.fill();
+
+    // Lock diamond around the locked target, projected to screen.
+    if (hs.lockTarget) this.drawLock(world, hs, cam, w, h);
+
+    // Artificial horizon bar under the crosshair, low enough to clear the jet.
+    const rollRad = hs.rollDeg * Math.PI / 180;
+    c.save();
+    c.translate(cx, cy + 132);
+    c.rotate(-rollRad);
+    c.strokeStyle = 'rgba(125, 255, 154, 0.8)';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.moveTo(-70, 0); c.lineTo(-24, 0);
+    c.moveTo(24, 0); c.lineTo(70, 0);
+    c.moveTo(0, -6); c.lineTo(0, 6);
+    c.stroke();
+    c.restore();
+
+    this.drawTape(c, 46, h / 2 - 170, 340, 'SPD', hs.speedKmh, 10, 'km/h', 0, 1400);
+    this.drawTape(c, w - 86, h / 2 - 170, 340, 'ALT', hs.alt, 50, 'm', 0, 2400);
+    this.drawCompass(c, w, hs.heading);
+    this.drawRadar(c, world, hs, w, h);
+    this.drawReadouts(c, world, hs, w, h);
+    this.drawWarnings(c, hs, w, h);
+    if (hs.message) {
+      c.font = 'bold 26px system-ui, sans-serif';
+      c.textAlign = 'center';
+      c.fillStyle = '#ffd94d';
+      c.shadowColor = '#000'; c.shadowBlur = 6;
+      c.fillText(hs.message, cx, 108);
+      c.shadowBlur = 0;
     }
   }
-  ctx.restore();
 
-  // Top-left: mission + objective progress.
-  panel(ctx, 16, 14, 330, 66, 0.55);
-  text(ctx, g.mission.name.toUpperCase(), 30, 38, 15, '#fff');
-  text(ctx, g.objectiveText, 30, 60, 12, '#ffd25e', 'left', false);
-
-  // Top-right: score, time, fuel, hull and throttle — one panel.
-  panel(ctx, w - 246, 14, 230, 118, 0.55);
-  text(ctx, 'SCORE ' + g.score.toLocaleString('en-US'), w - 30, 38, 15, '#fff', 'right');
-  text(ctx, 'TIME ' + fmtTime(g.elapsed), w - 30, 60, 12, '#cfe6ff', 'right', false);
-  // Fuel bar.
-  bar(ctx, w - 230, 78, 110, 10, p.fuel / 100, p.fuel < 20 ? '#ff5252' : '#37c978', 'FUEL');
-  bar(ctx, w - 110, 78, 94, 10, 1 - p.damage / 100, '#37c978', 'HULL');
-  // Throttle bar under the fuel.
-  bar(ctx, w - 230, 104, 214, 8, p.throttle, '#7ec8ff', 'THR');
-
-  // Centre reticle + next-target guidance arrow.
-  const rx = w / 2, ry = h * 0.44;
-  ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.6;
-  ctx.beginPath(); ctx.arc(rx, ry, 14, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(rx - 22, ry); ctx.lineTo(rx - 8, ry);
-  ctx.moveTo(rx + 8, ry); ctx.lineTo(rx + 22, ry);
-  ctx.moveTo(rx, ry - 22); ctx.lineTo(rx, ry - 8);
-  ctx.moveTo(rx, ry + 8); ctx.lineTo(rx, ry + 22);
-  ctx.stroke();
-  if (g.guideAngle !== null && g.phase === 'flying') {
-    const a = g.guideAngle;
-    const gx = rx + Math.sin(a) * 74, gy = ry - Math.cos(a) * 74;
-    ctx.save();
-    ctx.translate(gx, gy); ctx.rotate(a);
-    ctx.fillStyle = '#ffb020';
-    ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(8, 8); ctx.lineTo(-8, 8); ctx.closePath(); ctx.fill();
-    ctx.restore();
-    text(ctx, g.guideLabel, gx, gy + 26, 11, '#ffd25e', 'center');
+  drawTape(c, x, y, height, label, value, step, unit, min, max) {
+    c.save();
+    c.fillStyle = 'rgba(4, 14, 22, 0.55)';
+    c.fillRect(x, y, 40, height);
+    c.strokeStyle = 'rgba(125, 255, 154, 0.5)';
+    c.lineWidth = 1;
+    c.strokeRect(x, y, 40, height);
+    const cy = y + height / 2;
+    c.font = '11px system-ui, sans-serif';
+    c.textAlign = 'center';
+    // Tick marks: values within view of the current value.
+    const pxPerUnit = height / (step * 8);
+    const base = Math.round(value / step) * step;
+    for (let k = -4; k <= 4; k++) {
+      const v = base + k * step;
+      if (v < min || v > max) continue;
+      const yy = cy - (v - value) * pxPerUnit;
+      if (yy < y + 16 || yy > y + height - 10) continue; // keep labels inside the tape
+      c.strokeStyle = 'rgba(147,216,168,0.7)';
+      c.beginPath(); c.moveTo(x + 28, yy); c.lineTo(x + 40, yy); c.stroke();
+      c.fillStyle = '#bfe8c8';
+      c.fillText(String(v), x + 14, yy + 4);
+    }
+    // Centre value box.
+    c.fillStyle = '#0a2a16';
+    c.fillRect(x - 6, cy - 13, 52, 26);
+    c.strokeStyle = '#93d8a8'; c.lineWidth = 1.5;
+    c.strokeRect(x - 6, cy - 13, 52, 26);
+    c.fillStyle = '#93d8a8';
+    c.font = 'bold 15px system-ui, sans-serif';
+    c.fillText(String(value), x + 20, cy + 5);
+    c.fillStyle = '#93d8a8';
+    c.font = 'bold 12px system-ui, sans-serif';
+    c.fillText(label, x + 20, y - 8);
+    c.font = '10px system-ui, sans-serif';
+    c.fillStyle = '#9db8a6';
+    c.fillText(unit, x + 20, y + height + 26);
+    c.restore();
   }
 
-  // Warnings.
-  let warnY = 150;
-  const warns = [];
-  if (p.stalled) warns.push(['STALL — NOSE DOWN, ADD POWER', '#ff5252']);
-  if (p.fuel > 0 && p.fuel < 18) warns.push(['LOW FUEL', '#ff5252']);
-  if (p.alt < 60 && p.alt > 2 && p.verticalSpeed < -6) warns.push(['PULL UP', '#ffb020']);
-  if (g.message) warns.push([g.message, '#7dff9a']);
-  for (const [s, c] of warns) {
-    const blink = c === '#ff5252' ? (Math.floor(g.time * 3) % 2 === 0 ? 1 : 0.35) : 1;
-    ctx.globalAlpha = blink;
-    text(ctx, s, w / 2, warnY, 17, c, 'center');
-    ctx.globalAlpha = 1;
-    warnY += 26;
+  drawCompass(c, w, heading) {
+    const cx = w / 2, y = 34;
+    c.save();
+    c.fillStyle = 'rgba(4, 14, 22, 0.55)';
+    c.fillRect(cx - 190, y - 18, 380, 36);
+    c.strokeStyle = 'rgba(125, 255, 154, 0.5)';
+    c.strokeRect(cx - 190, y - 18, 380, 36);
+    const names = { 0: 'N', 45: 'NE', 90: 'E', 135: 'SE', 180: 'S', 225: 'SW', 270: 'W', 315: 'NW' };
+    c.font = '12px system-ui, sans-serif';
+    c.textAlign = 'center';
+    for (let d = 0; d < 360; d += 15) {
+      let rel = ((d - heading + 540) % 360) - 180;
+      if (Math.abs(rel) > 85) continue;
+      const x = cx + rel * 2.1;
+      const major = d % 45 === 0;
+      c.strokeStyle = major ? '#93d8a8' : 'rgba(125,255,154,0.4)';
+      c.beginPath(); c.moveTo(x, y + 8); c.lineTo(x, y + (major ? -4 : 2)); c.stroke();
+      if (major) {
+        c.fillStyle = '#cfe9d6';
+        c.fillText(names[d] || String(d), x, y - 6);
+      }
+    }
+    // Centre caret + heading number.
+    c.fillStyle = '#ffd94d';
+    c.beginPath(); c.moveTo(cx - 7, y + 14); c.lineTo(cx + 7, y + 14); c.lineTo(cx, y + 22); c.fill();
+    c.font = 'bold 13px system-ui, sans-serif';
+    c.fillText(String(heading).padStart(3, '0') + '°', cx, y + 38);
+    c.restore();
   }
 
-  // Score popups (floating +points).
-  ctx.save();
-  for (const pop of g.popups) {
-    ctx.globalAlpha = clamp(pop.life, 0, 1);
-    text(ctx, pop.text, pop.x, pop.y - (1.6 - pop.life) * 40, 16, '#7dff9a', 'center');
+  drawRadar(c, world, hs, w, h) {
+    const rx = 118, ry = h - 118, R = 92;
+    c.save();
+    c.fillStyle = 'rgba(4, 14, 22, 0.6)';
+    c.beginPath(); c.arc(rx, ry, R, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = '#93d8a8'; c.lineWidth = 1.5;
+    c.beginPath(); c.arc(rx, ry, R, 0, Math.PI * 2); c.stroke();
+    c.strokeStyle = 'rgba(125,255,154,0.35)';
+    c.beginPath(); c.arc(rx, ry, R / 2, 0, Math.PI * 2); c.stroke();
+    c.beginPath(); c.moveTo(rx - R, ry); c.lineTo(rx + R, ry); c.stroke();
+    c.beginPath(); c.moveTo(rx, ry - R); c.lineTo(rx, ry + R); c.stroke();
+    const p = world.player;
+    const range = 5200;
+    const plot = (pos, colour, size, ring) => {
+      const dx = pos[0] - p.pos[0], dz = pos[2] - p.pos[2];
+      // Rotate so up on the radar is the player's heading.
+      const yaw = p.yaw;
+      const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+      const rx2 = dx * fz - dz * fx;   // right component
+      const ry2 = dx * fx + dz * fz;   // forward component
+      const px = rx + clamp(rx2 / range, -1, 1) * (R - 8);
+      const py = ry - clamp(ry2 / range, -1, 1) * (R - 8);
+      c.fillStyle = colour;
+      if (ring) { c.beginPath(); c.arc(px, py, size, 0, Math.PI * 2); c.stroke(); }
+      else { c.beginPath(); c.arc(px, py, size, 0, Math.PI * 2); c.fill(); }
+    };
+    // Runway (white square), ring (yellow circle), enemies (red dots).
+    plot([RUNWAY.x, 0, RUNWAY.z], '#ffffff', 4, false);
+    if (!world.ring.passed) {
+      c.strokeStyle = '#ffd94d'; c.lineWidth = 1.5;
+      plot(world.ring.pos, '#ffd94d', 7, true);
+    }
+    for (const e of world.enemies) {
+      if (!e.alive) continue;
+      plot(e.pos, '#ff4d3d', e === hs.lockTarget ? 7 : 4.5, false);
+    }
+    // Player wedge at the centre, pointing up.
+    c.fillStyle = '#93d8a8';
+    c.beginPath(); c.moveTo(rx, ry - 9); c.lineTo(rx - 6, ry + 7); c.lineTo(rx + 6, ry + 7); c.closePath(); c.fill();
+    c.fillStyle = '#93d8a8';
+    c.font = 'bold 11px system-ui, sans-serif';
+    c.textAlign = 'center';
+    c.fillText('RADAR', rx, ry + R + 16);
+    c.restore();
   }
-  ctx.restore();
-}
 
-function bar(ctx, x, y, w, h, frac, color, label) {
-  ctx.fillStyle = 'rgba(255,255,255,0.18)';
-  ctx.beginPath(); ctx.roundRect(x, y, w, h, 4); ctx.fill();
-  ctx.fillStyle = color;
-  ctx.beginPath(); ctx.roundRect(x, y, Math.max(0, w * clamp(frac, 0, 1)), h, 4); ctx.fill();
-  text(ctx, label, x, y - 4, 9, '#9fd8ff', 'left');
-}
-
-export function fmtTime(t) {
-  const m = Math.floor(t / 60);
-  const s = Math.floor(t % 60);
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-// --- Screens drawn over the scene -------------------------------------
-
-function overlay(ctx, w, h, alpha = 0.45) {
-  ctx.fillStyle = `rgba(5, 10, 22, ${alpha})`;
-  ctx.fillRect(0, 0, w, h);
-}
-
-export function drawTitle(ctx, g, w, h) {
-  overlay(ctx, w, h, 0.32);
-  text(ctx, 'SKY COURIER', w / 2, h * 0.3, 64, '#fff', 'center');
-  text(ctx, 'A KESTREL K-7 FLIGHT GAME  ·  AUREA VALLEY', w / 2, h * 0.3 + 34, 15, '#ffd25e', 'center', false);
-  text(ctx, 'Fly the rings. Drop the parcels. Land her gently.', w / 2, h * 0.3 + 66, 16, '#dfeeff', 'center', false);
-  const bw = 560, bx = w / 2 - bw / 2, by = h * 0.46;
-  g.missions.forEach((m, i) => {
-    const y = by + i * 74;
-    const sel = i === g.selectedMission;
-    panel(ctx, bx, y, bw, 62, sel ? 0.85 : 0.5);
-    if (sel) { ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 2; ctx.stroke(); }
-    text(ctx, `${i + 1} · ${m.name.toUpperCase()}`, bx + 20, y + 26, 16, '#fff');
-    text(ctx, m.tagline, bx + 20, y + 48, 12, '#cfe6ff', 'left', false);
-    text(ctx, '›', bx + bw - 26, y + 34, 22, '#ffb020', 'center');
-  });
-  text(ctx, 'CLICK A MISSION OR PRESS 1 / 2 / 3, THEN ENTER TO FLY', w / 2, by + 3 * 74 + 26, 13, '#fff', 'center');
-  text(ctx, 'UP / DOWN pitch · LEFT / RIGHT bank · SHIFT throttle up · CTRL throttle down · SPACE drop · P pause · M mute', w / 2, h - 34, 13, '#cfe6ff', 'center', false);
-}
-
-export function drawBriefing(ctx, g, w, h) {
-  overlay(ctx, w, h, 0.55);
-  const m = g.mission;
-  panel(ctx, w / 2 - 320, h * 0.24, 640, 300, 0.9);
-  text(ctx, m.name.toUpperCase(), w / 2, h * 0.24 + 48, 30, '#fff', 'center');
-  text(ctx, m.tagline, w / 2, h * 0.24 + 80, 15, '#ffd25e', 'center', false);
-  wrapText(ctx, m.blurb, w / 2 - 280, h * 0.24 + 118, 560, 20, 14, '#e8f2ff');
-  text(ctx, 'PRESS ENTER TO TAKE OFF', w / 2, h * 0.24 + 268, 15, '#7dff9a', 'center');
-}
-
-export function drawResults(ctx, g, w, h) {
-  overlay(ctx, w, h, 0.6);
-  const won = g.phase === 'complete';
-  panel(ctx, w / 2 - 330, h * 0.18, 660, 400, 0.92);
-  text(ctx, won ? 'SORTIE COMPLETE' : g.phase === 'crashed' ? 'CRASHED' : 'OUT OF FUEL', w / 2, h * 0.18 + 56, 34, won ? '#7dff9a' : '#ff5252', 'center');
-  text(ctx, g.mission.name + '  ·  ' + g.resultLine, w / 2, h * 0.18 + 90, 14, '#cfe6ff', 'center', false);
-  const rows = [
-    ['FINAL SCORE', g.score.toLocaleString('en-US')],
-    ['RINGS THREADED', `${g.ringsHit} / ${g.ringsTotal}`],
-    ['PARCELS ON TARGET', `${g.dropsHit} / ${g.dropsTotal}`],
-    ['LANDING', g.landingText],
-    ['TIME', fmtTime(g.elapsed)],
-    ['BEST SCORE', (g.bestScore || 0).toLocaleString('en-US')],
-  ];
-  rows.forEach(([k, v], i) => {
-    const y = h * 0.18 + 140 + i * 34;
-    text(ctx, k, w / 2 - 280, y, 14, '#9fd8ff', 'left', false);
-    text(ctx, v, w / 2 + 280, y, 14, '#fff', 'right');
-  });
-  text(ctx, 'ENTER — FLY AGAIN      ·      T — BACK TO MISSIONS', w / 2, h * 0.18 + 372, 13, '#ffd25e', 'center');
-}
-
-export function drawPaused(ctx, w, h) {
-  overlay(ctx, w, h, 0.5);
-  text(ctx, 'PAUSED', w / 2, h / 2 - 10, 40, '#fff', 'center');
-  text(ctx, 'P to resume · R to restart the sortie', w / 2, h / 2 + 28, 14, '#cfe6ff', 'center', false);
-}
-
-function wrapText(ctx, s, x, y, maxW, lineH, size, color) {
-  ctx.fillStyle = color;
-  ctx.font = `400 ${size}px ${FONT}`;
-  ctx.textAlign = 'left';
-  const words = s.split(' ');
-  let line = '';
-  let yy = y;
-  for (const word of words) {
-    const test = line ? line + ' ' + word : word;
-    if (ctx.measureText(test).width > maxW && line) {
-      ctx.fillText(line, x, yy);
-      line = word;
-      yy += lineH;
-    } else line = test;
+  drawReadouts(c, world, hs, w, h) {
+    c.save();
+    c.textAlign = 'left';
+    c.font = 'bold 15px system-ui, sans-serif';
+    c.fillStyle = '#e8f5ec';
+    c.fillText('SCORE  ' + hs.score, w - 250, 46);
+    c.fillText('KILLS  ' + hs.kills + ' / ' + hs.total, w - 250, 70);
+    c.fillText('WAVE  ' + hs.wave, w - 250, 94);
+    // Hull bar.
+    this.drawBar(c, w - 250, 108, 200, 12, hs.hp / 100, hs.hp > 40 ? '#37d67a' : '#ff4d3d', 'HULL ' + hs.hp + '%');
+    // Throttle bar.
+    this.drawBar(c, w - 250, 132, 200, 12, hs.throttle, '#4db2ff', 'THR ' + Math.round(hs.throttle * 100) + '%');
+    c.font = '14px system-ui, sans-serif';
+    c.fillStyle = '#e8f5ec';
+    c.fillText('GUN  ' + hs.ammo, w - 250, 176);
+    c.fillText('MSL  ' + '◆'.repeat(Math.max(0, hs.missiles)) + '  x' + hs.missiles, w - 250, 198);
+    // Pitch / roll readout, bottom right.
+    c.textAlign = 'right';
+    c.fillStyle = '#9db8a6';
+    c.font = '12px system-ui, sans-serif';
+    c.fillText('PITCH ' + hs.pitchDeg + '°   ROLL ' + hs.rollDeg + '°', w - 24, h - 24);
+    c.restore();
   }
-  ctx.fillText(line, x, yy);
+
+  drawBar(c, x, y, w, h, frac, colour, label) {
+    c.fillStyle = 'rgba(4, 14, 22, 0.6)';
+    c.fillRect(x, y, w, h);
+    c.fillStyle = colour;
+    c.fillRect(x, y, w * clamp(frac, 0, 1), h);
+    c.strokeStyle = 'rgba(125,255,154,0.5)';
+    c.strokeRect(x, y, w, h);
+    c.fillStyle = '#e8f5ec';
+    c.font = '10px system-ui, sans-serif';
+    c.textAlign = 'left';
+    c.fillText(label, x + 4, y + h - 3);
+  }
+
+  drawWarnings(c, hs, w, h) {
+    const cx = w / 2;
+    c.save();
+    c.textAlign = 'center';
+    c.font = 'bold 30px system-ui, sans-serif';
+    let warn = '';
+    if (hs.state === 'flying' && hs.stall) warn = 'STALL — NOSE DOWN, THROTTLE UP';
+    else if (hs.state === 'flying' && hs.lowAlt) warn = 'PULL UP';
+    if (warn) {
+      const blink = Math.floor(Date.now() / 350) % 2 === 0;
+      if (blink) {
+        c.fillStyle = '#ff4d3d';
+        c.shadowColor = '#000'; c.shadowBlur = 8;
+        c.fillText(warn, cx, h - 170);
+        c.shadowBlur = 0;
+      }
+    }
+    if (hs.locked) {
+      c.fillStyle = '#ff4d3d';
+      c.font = 'bold 20px system-ui, sans-serif';
+      c.fillText('LOCK', cx, h / 2 - 64);
+    } else if (hs.lockTarget) {
+      c.fillStyle = '#ffd94d';
+      c.font = 'bold 20px system-ui, sans-serif';
+      c.fillText('LOCKING ' + Math.round(hs.lockFrac * 100) + '%', cx, h / 2 - 64);
+    }
+    c.restore();
+  }
+
+  drawLock(world, hs, cam, w, h) {
+    const c = this.ctx;
+    const t = hs.lockTarget;
+    if (!t) return;
+    const p = projectToScreen(t.pos, cam, w, h);
+    if (!p || p.z > 1) return;
+    const size = clamp(9000 / p.dist, 22, 70);
+    c.save();
+    c.strokeStyle = hs.locked ? '#ff4d3d' : '#ffd94d';
+    c.lineWidth = 2.5;
+    const s = size, x = p.x, y = p.y;
+    c.beginPath();
+    c.moveTo(x - s, y - s + 12); c.lineTo(x - s, y - s); c.lineTo(x - s + 12, y - s);
+    c.moveTo(x + s - 12, y - s); c.lineTo(x + s, y - s); c.lineTo(x + s, y - s + 12);
+    c.moveTo(x + s, y + s - 12); c.lineTo(x + s, y + s); c.lineTo(x + s - 12, y + s);
+    c.moveTo(x - s + 12, y + s); c.lineTo(x - s, y + s); c.lineTo(x - s, y + s - 12);
+    c.stroke();
+    c.restore();
+  }
+
+  drawMenu(world, hs, w, h) {
+    const c = this.ctx;
+    const cx = w / 2;
+    c.fillStyle = 'rgba(4, 10, 18, 0.20)';
+    c.fillRect(0, 0, w, h);
+    c.textAlign = 'center';
+    c.fillStyle = '#e8f5ec';
+    c.font = 'bold 64px system-ui, sans-serif';
+    c.shadowColor = '#000'; c.shadowBlur = 14;
+    c.fillText('STEEL FALCON', cx, h / 2 - 110);
+    c.shadowBlur = 0;
+    c.fillStyle = '#ffd94d';
+    c.font = 'bold 22px system-ui, sans-serif';
+    c.fillText('3D JET DOGFIGHT OVER THE COASTAL RANGE', cx, h / 2 - 72);
+    c.fillStyle = '#cfe9d6';
+    c.font = '17px system-ui, sans-serif';
+    c.fillText('Six hostile jets are hunting over the valley. Wipe them all out.', cx, h / 2 - 34);
+    c.fillText('Thread the gold ring for +250. Land gently on the runway to re-arm.', cx, h / 2 - 8);
+    c.font = 'bold 24px system-ui, sans-serif';
+    c.fillStyle = '#93d8a8';
+    const blink = Math.floor(Date.now() / 500) % 2 === 0;
+    if (blink) c.fillText('PRESS ENTER TO FLY', cx, h / 2 + 52);
+    c.font = '15px system-ui, sans-serif';
+    c.fillStyle = '#9db8a6';
+    c.fillText('ARROWS steer · SHIFT / CTRL throttle · SPACE guns · F missile (needs lock) · P pause · M mute', cx, h / 2 + 96);
+    c.fillText('Mouse steers too — move to aim, click to fire, right-click to launch a locked missile.', cx, h / 2 + 120);
+  }
+
+  drawPaused(w, h) {
+    const c = this.ctx;
+    c.fillStyle = 'rgba(4, 10, 18, 0.55)';
+    c.fillRect(0, 0, w, h);
+    c.textAlign = 'center';
+    c.fillStyle = '#e8f5ec';
+    c.font = 'bold 44px system-ui, sans-serif';
+    c.fillText('PAUSED', w / 2, h / 2 - 10);
+    c.font = '17px system-ui, sans-serif';
+    c.fillStyle = '#9db8a6';
+    c.fillText('Press P to resume · R to restart', w / 2, h / 2 + 28);
+  }
+
+  drawEnd(world, hs, w, h) {
+    const c = this.ctx;
+    const cx = w / 2;
+    c.textAlign = 'center';
+    if (hs.state === 'win') {
+      c.fillStyle = '#ffd94d';
+      c.font = 'bold 52px system-ui, sans-serif';
+      c.fillText('SQUADRON WIPED OUT', cx, h / 2 - 60);
+      c.fillStyle = '#e8f5ec';
+      c.font = '22px system-ui, sans-serif';
+      c.fillText('All hostiles down. The coast is yours, Falcon.', cx, h / 2 - 20);
+    } else {
+      c.fillStyle = '#ff4d3d';
+      c.font = 'bold 52px system-ui, sans-serif';
+      c.fillText('STEEL FALCON DOWN', cx, h / 2 - 60);
+      c.fillStyle = '#e8f5ec';
+      c.font = '22px system-ui, sans-serif';
+      c.fillText('Your jet is gone — but the squadron still flies.', cx, h / 2 - 20);
+    }
+    c.fillStyle = '#e8f5ec';
+    c.font = 'bold 24px system-ui, sans-serif';
+    c.fillText('SCORE ' + hs.score + '   ·   KILLS ' + hs.kills, cx, h / 2 + 30);
+    c.font = '17px system-ui, sans-serif';
+    c.fillStyle = '#9db8a6';
+    c.fillText('Press R or ENTER to fly again', cx, h / 2 + 66);
+  }
+}
+
+// Project a world point to screen pixels using the camera's view-projection.
+// Returns { x, y, z, dist } or null if behind the camera.
+export function projectToScreen(pos, cam, w, h) {
+  const rel = v3sub(pos, cam.pos);
+  const dist = v3len(rel);
+  const fwd = cam.fwd, right = cam.right, up = cam.up;
+  const cx = v3dot(rel, right);
+  const cy = v3dot(rel, up);
+  const cz = v3dot(rel, fwd);
+  if (cz < 1) return null;
+  const f = 1 / Math.tan(1.15 / 2); // matches the renderer's fov
+  const x = w / 2 + (cx / cz) * f * (h / 2);
+  const y = h / 2 - (cy / cz) * f * (h / 2);
+  return { x, y, z: cz, dist };
 }

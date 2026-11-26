@@ -1,65 +1,75 @@
-// Keyboard and mouse input. One job: turn raw device events into a
-// single plain object the flight model reads every frame.
-export function createInput(canvas) {
-  const keys = new Set();
-  const input = {
-    pitch: 0,    // -1 pull up .. +1 push down (from ArrowUp/Down or W/S)
-    roll: 0,     // -1 left .. +1 right (ArrowLeft/Right or A/D)
-    throttle: 0, // -1 idle .. +1 full (Shift / Ctrl held, or +/- keys)
-    throttleHeld: false,
-    drop: false, // pressed this frame: release a parcel
-    pause: false,
-    mute: false,
-    confirm: false, // Enter pressed this frame
-    restart: false, // R pressed this frame
-    mission: 0,     // 1..3 pressed this frame
-    mouseX: 0.5,    // 0..1 across the canvas; steers gently when moved
-    mouseActive: false,
-    anyKey: false,
-  };
+// Keyboard + mouse input for Steel Falcon. Keys are tracked by `code`
+// (layout independent); mouse steering moves an aim point the jet follows.
+// Pointer lock is not used — the game must also play in a headless
+// screenshot run, so mouse position is read relative to the canvas.
 
-  const down = (e) => {
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
-    if (e.repeat) return;
-    keys.add(e.code);
-    input.anyKey = true;
-    if (e.code === 'Space') input.drop = true;
-    if (e.code === 'Enter') input.confirm = true;
-    if (e.code === 'KeyR') input.restart = true;
-    if (e.code === 'KeyP' || e.code === 'Escape') input.pause = true;
-    if (e.code === 'KeyM') input.mute = true;
-    if (e.code === 'Digit1') input.mission = 1;
-    if (e.code === 'Digit2') input.mission = 2;
-    if (e.code === 'Digit3') input.mission = 3;
-    if (e.code === 'KeyT') input.toTitle = true;
-  };
-  const up = (e) => keys.delete(e.code);
-  window.addEventListener('keydown', down);
-  window.addEventListener('keyup', up);
-  window.addEventListener('blur', () => keys.clear());
-  canvas.addEventListener('mousemove', (e) => {
-    const r = canvas.getBoundingClientRect();
-    input.mouseX = (e.clientX - r.left) / r.width;
-    input.mouseActive = true;
-  });
-  canvas.addEventListener('mousedown', () => { input.drop = true; input.anyKey = true; });
+export class Input {
+  constructor(canvas) {
+    this.keys = new Set();
+    this.pressed = new Set(); // keys pressed since last poll()
+    this.mouseX = 0;
+    this.mouseY = 0;
+    this.mouseDown = false;
+    this.mouseClicked = false;
+    this.rightDown = false;
+    this.rightClicked = false;
+    this.anyKey = false;
 
-  // Read the live key set into the frame's control values.
-  input.poll = () => {
-    const k = (c) => keys.has(c);
-    input.pitch = (k('ArrowDown') || k('KeyS') ? 1 : 0) + (k('ArrowUp') || k('KeyW') ? -1 : 0);
-    input.roll = (k('ArrowRight') || k('KeyD') ? 1 : 0) + (k('ArrowLeft') || k('KeyA') ? -1 : 0);
-    input.throttle = (k('ShiftLeft') || k('ShiftRight') || k('Equal') ? 1 : 0) +
-      (k('ControlLeft') || k('ControlRight') || k('Minus') ? -1 : 0);
-    input.throttleHeld = input.throttle !== 0;
-  };
+    window.addEventListener('keydown', (e) => {
+      if (e.repeat) return;
+      this.keys.add(e.code);
+      this.pressed.add(e.code);
+      this.anyKey = true;
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+        e.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
+    window.addEventListener('blur', () => this.keys.clear());
 
-  // Edge-triggered flags are consumed once per frame by the game.
-  input.consumeEdges = () => {
-    const edges = { drop: input.drop, confirm: input.confirm, restart: input.restart, pause: input.pause, mute: input.mute, mission: input.mission, toTitle: input.toTitle };
-    input.drop = input.confirm = input.restart = input.pause = input.mute = input.toTitle = false;
-    input.mission = 0;
-    return edges;
-  };
-  return input;
+    canvas.addEventListener('mousemove', (e) => {
+      const r = canvas.getBoundingClientRect();
+      this.mouseX = e.clientX - r.left;
+      this.mouseY = e.clientY - r.top;
+    });
+    canvas.addEventListener('mousedown', (e) => {
+      if (e.button === 0) { this.mouseDown = true; this.mouseClicked = true; }
+      if (e.button === 2) { this.rightDown = true; this.rightClicked = true; }
+      this.anyKey = true;
+    });
+    window.addEventListener('mouseup', (e) => {
+      if (e.button === 0) this.mouseDown = false;
+      if (e.button === 2) this.rightDown = false;
+    });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+
+  down(code) { return this.keys.has(code); }
+
+  // True once per physical press; consumed by poll().
+  wasPressed(code) { return this.pressed.has(code); }
+
+  // Call once per frame: clears edge-triggered state.
+  poll() {
+    this.pressed.clear();
+    this.mouseClicked = false;
+    this.rightClicked = false;
+    this.anyKey = false;
+  }
+
+  // -1..1 steering from arrow keys.
+  steerX() {
+    let x = 0;
+    if (this.down('ArrowLeft') || this.down('KeyA')) x -= 1;
+    if (this.down('ArrowRight') || this.down('KeyD')) x += 1;
+    return x;
+  }
+
+  steerY() {
+    // Arrows only: W/S are throttle, so they must not pitch the jet.
+    let y = 0;
+    if (this.down('ArrowUp')) y -= 1;
+    if (this.down('ArrowDown')) y += 1;
+    return y;
+  }
 }

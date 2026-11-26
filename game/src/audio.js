@@ -1,80 +1,157 @@
-// Synthesised sound: every effect is built with WebAudio oscillators
-// and filtered noise, so the game ships no audio files at all.
-// Audio starts only after a user gesture; headless runs stay silent.
-export function createAudio() {
-  let ctx = null;
-  let engineOsc = null;
-  let engineGain = null;
-  let windSrc = null;
-  let windGain = null;
-  let muted = false;
-  let started = false;
+// Synthesised WebAudio sounds for Steel Falcon — no audio files. Engine
+// drone follows throttle, gunfire is a filtered noise burst, missiles a
+// rising whoosh, explosions a noise burst plus a low sine thump.
 
-  function ensure() {
-    if (started) return true;
-    try {
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-    } catch { return false; }
-    started = true;
-    // Engine: two detuned saws through a low-pass, pitch follows throttle.
-    engineOsc = ctx.createOscillator();
-    engineOsc.type = 'sawtooth';
-    engineOsc.frequency.value = 70;
-    const osc2 = ctx.createOscillator();
-    osc2.type = 'sawtooth';
-    osc2.frequency.value = 71.5;
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 420;
-    engineGain = ctx.createGain(); engineGain.gain.value = 0;
-    engineOsc.connect(lp); osc2.connect(lp); lp.connect(engineGain); engineGain.connect(ctx.destination);
-    engineOsc.start(); osc2.start();
-    // Wind: looped noise buffer, loudness follows airspeed.
-    const len = ctx.sampleRate * 2;
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const data = buf.getChannelData(0);
+export class SoundBank {
+  constructor() {
+    this.ctx = null;
+    this.muted = false;
+    this.engineOsc = null;
+    this.engineGain = null;
+    this.engineFilter = null;
+    this.noiseBuf = null;
+  }
+
+  ensure() {
+    if (this.ctx) {
+      if (this.ctx.state === 'suspended') this.ctx.resume();
+      return;
+    }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    // 1 s of white noise, reused by every noise-based sound.
+    const len = this.ctx.sampleRate;
+    this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
-    windSrc = ctx.createBufferSource();
-    windSrc.buffer = buf; windSrc.loop = true;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.frequency.value = 700; bp.Q.value = 0.6;
-    windGain = ctx.createGain(); windGain.gain.value = 0;
-    windSrc.connect(bp); bp.connect(windGain); windGain.connect(ctx.destination);
-    windSrc.start();
-    return true;
+    // Engine: two detuned saws through a low-pass, always running.
+    this.engineOsc = this.ctx.createOscillator();
+    this.engineOsc.type = 'sawtooth';
+    this.engineOsc.frequency.value = 55;
+    const osc2 = this.ctx.createOscillator();
+    osc2.type = 'sawtooth';
+    osc2.frequency.value = 58;
+    this.engineFilter = this.ctx.createBiquadFilter();
+    this.engineFilter.type = 'lowpass';
+    this.engineFilter.frequency.value = 320;
+    this.engineGain = this.ctx.createGain();
+    this.engineGain.gain.value = 0;
+    this.engineOsc.connect(this.engineFilter);
+    osc2.connect(this.engineFilter);
+    this.engineFilter.connect(this.engineGain);
+    this.engineGain.connect(this.ctx.destination);
+    this.engineOsc.start();
+    osc2.start();
+    this.engineOsc2 = osc2;
   }
 
-  function blip(freq, dur, type = 'sine', vol = 0.2, slide = 0) {
-    if (!ctx || muted) return;
-    const t = ctx.currentTime;
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = type; o.frequency.setValueAtTime(freq, t);
-    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
-    g.gain.setValueAtTime(vol, t);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(ctx.destination);
-    o.start(t); o.stop(t + dur + 0.02);
+  setEngine(throttle, speedNorm, flying) {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    const target = flying ? 0.05 + throttle * 0.05 + speedNorm * 0.02 : 0.0;
+    this.engineGain.gain.setTargetAtTime(target, t, 0.15);
+    const freq = 48 + throttle * 70 + speedNorm * 40;
+    this.engineOsc.frequency.setTargetAtTime(freq, t, 0.1);
+    this.engineOsc2.frequency.setTargetAtTime(freq * 1.02 + 2, t, 0.1);
+    this.engineFilter.frequency.setTargetAtTime(240 + throttle * 900, t, 0.2);
   }
 
-  return {
-    // Call on any gesture; safe to call every frame.
-    unlock() { if (ensure() && ctx.state === 'suspended') ctx.resume(); },
-    setMuted(m) { muted = m; if (engineGain) engineGain.gain.value = 0; if (windGain) windGain.gain.value = 0; },
-    isMuted() { return muted; },
-    // Continuous engine + wind, called every frame with 0..1 values.
-    update(throttle, speedNorm) {
-      if (!ctx || muted || ctx.state !== 'running') return;
-      const t = ctx.currentTime;
-      engineGain.gain.setTargetAtTime(0.05 + throttle * 0.06, t, 0.1);
-      if (engineOsc) engineOsc.frequency.setTargetAtTime(62 + throttle * 55, t, 0.1);
-      windGain.gain.setTargetAtTime(speedNorm * 0.05, t, 0.15);
-    },
-    ring() { blip(880, 0.18, 'sine', 0.22); blip(1318, 0.3, 'sine', 0.16); },
-    centre() { blip(1046, 0.12, 'sine', 0.2); blip(1568, 0.35, 'sine', 0.2); },
-    drop() { blip(520, 0.12, 'triangle', 0.2, -220); },
-    thud() { blip(90, 0.25, 'sine', 0.35, -40); },
-    crash() { blip(140, 0.7, 'sawtooth', 0.3, -100); },
-    alarm() { blip(660, 0.14, 'square', 0.08); },
-    win() { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => blip(f, 0.35, 'sine', 0.18), i * 110)); },
-  };
+  setMuted(m) {
+    this.muted = m;
+    if (this.ctx && this.engineGain) {
+      this.engineGain.gain.setTargetAtTime(m ? 0 : 0.06, this.ctx.currentTime, 0.05);
+    }
+  }
+
+  _noise(dur, filterType, freq, gain, when = 0) {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime + when;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.loop = true;
+    const flt = this.ctx.createBiquadFilter();
+    flt.type = filterType;
+    flt.frequency.value = freq;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(gain, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(flt); flt.connect(g); g.connect(this.ctx.destination);
+    src.start(t); src.stop(t + dur + 0.05);
+  }
+
+  gun() { this._noise(0.09, 'highpass', 900, 0.22); }
+
+  missileLaunch() {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf; src.loop = true;
+    const flt = this.ctx.createBiquadFilter();
+    flt.type = 'bandpass';
+    flt.frequency.setValueAtTime(300, t);
+    flt.frequency.exponentialRampToValueAtTime(2400, t + 0.7);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.28, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
+    src.connect(flt); flt.connect(g); g.connect(this.ctx.destination);
+    src.start(t); src.stop(t + 0.85);
+  }
+
+  explosion(big = false) {
+    this._noise(big ? 1.4 : 0.8, 'lowpass', big ? 500 : 800, big ? 0.5 : 0.32);
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(big ? 90 : 120, t);
+    osc.frequency.exponentialRampToValueAtTime(28, t + (big ? 1.0 : 0.5));
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(big ? 0.5 : 0.3, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + (big ? 1.1 : 0.6));
+    osc.connect(g); g.connect(this.ctx.destination);
+    osc.start(t); osc.stop(t + 1.2);
+  }
+
+  lockBeep() {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'square';
+    osc.frequency.value = 1180;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.06, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+    osc.connect(g); g.connect(this.ctx.destination);
+    osc.start(t); osc.stop(t + 0.1);
+  }
+
+  chime() {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    for (const [f, d] of [[660, 0], [990, 0.09]]) {
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.12, t + d);
+      g.gain.exponentialRampToValueAtTime(0.001, t + d + 0.35);
+      osc.connect(g); g.connect(this.ctx.destination);
+      osc.start(t + d); osc.stop(t + d + 0.4);
+    }
+  }
+
+  warning() {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(520, t);
+    osc.frequency.setValueAtTime(390, t + 0.14);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.05, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    osc.connect(g); g.connect(this.ctx.destination);
+    osc.start(t); osc.stop(t + 0.32);
+  }
 }
