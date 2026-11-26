@@ -1,16 +1,16 @@
-// Steel Falcon — a 3D jet-fighter dogfight, built for this bounty entry.
-// You fly a MiG-29-style jet from a chase camera over a HD coastal terrain
-// with an airbase and runway below, hunting enemy jets driven by AI.
-// Controls: pitch and roll with the mouse or arrows, throttle with W/S,
-// guns with Space, and lock-on missiles with F once the tone sounds.
-// The HUD shows speed, altitude, throttle, ammo, and a radar sweep that
-// tracks every hostile in the sky around you.
-// All art is procedural: the jet, terrain, clouds, and explosions are
-// drawn with raw WebGL, no external assets, and the engine roar, gunfire,
-// and missile whoosh are synthesised live with WebAudio.
-// The game is plain static files under game/ (index.html plus modules),
-// runs fully offline in a desktop browser, and makes no network request.
-// This entrypoint copies game/ and screenshots/ beside it into the output
+// Steel Falcon — entry for the make.fun best-flight-game bounty
+// (best-flight-game-20261126-0057, $500). A 3D jet dogfight rebuilt
+// around its visuals: the player's jet and the AI enemies now carry
+// far more surface detail, the coastal terrain below is richer, and
+// the sky is filled with drifting clouds. A large gold practice ring
+// hangs in the air with a beacon and a HUD guide, so the player
+// always sees where to fly next.
+// Mouse or arrows steer, W/S work the throttle, Space fires the guns,
+// and F launches a lock-on missile when the tone sounds. Speed,
+// altitude, throttle, ammo, and a radar sweep all show on the HUD.
+// Everything visual is procedural WebGL and every sound is live
+// WebAudio, so the game needs no downloaded assets and runs offline.
+// This entrypoint copies game/ and screenshots/ into the output
 // directory and writes dossier.json, the summary the judge reads.
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
