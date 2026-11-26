@@ -61,6 +61,13 @@ export class Hud {
     // Lock diamond around the locked target, projected to screen.
     if (hs.lockTarget) this.drawLock(world, hs, cam, w, h);
 
+    // Gold ring guide: an on-screen marker when the ring is visible,
+    // or an edge arrow pointing toward it when it is off-screen, so the
+    // player always knows where the +250 ring is.
+    if (world.ring && !world.ring.passed && hs.state === 'flying') {
+      this.drawRingGuide(world, hs, cam, w, h);
+    }
+
     // Artificial horizon bar under the crosshair, low enough to clear the jet.
     const rollRad = hs.rollDeg * Math.PI / 180;
     c.save();
@@ -290,6 +297,56 @@ export class Hud {
     c.moveTo(x + s, y + s - 12); c.lineTo(x + s, y + s); c.lineTo(x + s - 12, y + s);
     c.moveTo(x - s + 12, y + s); c.lineTo(x - s, y + s); c.lineTo(x - s, y + s - 12);
     c.stroke();
+    c.restore();
+  }
+
+  // Ring guide: a pulsing gold diamond with a distance label on the ring
+  // when it is on screen; when it is off-screen or behind the camera, a
+  // gold arrow pinned to the screen edge pointing toward it.
+  drawRingGuide(world, hs, cam, w, h) {
+    const c = this.ctx;
+    const ring = world.ring;
+    const dist = Math.round(v3len(v3sub(ring.pos, world.player.pos)));
+    const p = projectToScreen(ring.pos, cam, w, h);
+    c.save();
+    c.textAlign = 'center';
+    if (p && p.x > 70 && p.x < w - 70 && p.y > 70 && p.y < h - 70) {
+      const pulse = 1 + 0.12 * Math.sin(world.time * 4);
+      const s = 26 * pulse;
+      c.strokeStyle = '#ffd94d';
+      c.lineWidth = 3;
+      c.beginPath();
+      c.moveTo(p.x, p.y - s); c.lineTo(p.x + s, p.y);
+      c.lineTo(p.x, p.y + s); c.lineTo(p.x - s, p.y);
+      c.closePath(); c.stroke();
+      c.font = 'bold 18px system-ui, sans-serif';
+      c.fillStyle = '#ffd94d';
+      c.shadowColor = '#000'; c.shadowBlur = 5;
+      c.fillText('RING +250  •  ' + dist + ' m', p.x, p.y - s - 12);
+      c.shadowBlur = 0;
+    } else {
+      const rel = v3sub(ring.pos, cam.pos);
+      let ax = v3dot(rel, cam.right);
+      let ay = -v3dot(rel, cam.up);
+      if (v3dot(rel, cam.fwd) < 0) { ax = -ax; ay = -ay; }
+      const len = Math.hypot(ax, ay) || 1;
+      ax /= len; ay /= len;
+      const ex = w / 2 + ax * (w / 2 - 80);
+      const ey = h / 2 + ay * (h / 2 - 80);
+      const ang = Math.atan2(ay, ax);
+      c.translate(ex, ey);
+      c.rotate(ang);
+      c.fillStyle = '#ffd94d';
+      c.beginPath();
+      c.moveTo(26, 0); c.lineTo(-14, -16); c.lineTo(-6, 0); c.lineTo(-14, 16);
+      c.closePath(); c.fill();
+      c.rotate(-ang);
+      c.font = 'bold 16px system-ui, sans-serif';
+      c.fillStyle = '#ffd94d';
+      c.shadowColor = '#000'; c.shadowBlur = 5;
+      c.fillText('RING ' + dist + ' m', 0, 46);
+      c.shadowBlur = 0;
+    }
     c.restore();
   }
 

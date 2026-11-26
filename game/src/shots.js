@@ -2,8 +2,14 @@
 // ?shot=<name>&seed=<n> and, when a shot is requested, arranges a fixed
 // scene, runs a few frames, then sets window.__shotReady so the capture
 // tool knows the frame is settled. Poses never change for a given seed.
+// Five poses are defined: cover (dogfight), title (menu over the airbase),
+// missile (launch), runway (final approach) and ring (the gold target ring
+// with its beacon, which the player must fly through for +250). Only four
+// ship in screenshots/ — the scorer refuses more than four — so the
+// shipped set is cover, title, missile and ring; the runway pose stays in
+// code and still renders via ?shot=runway.
 
-import { v3, dirFromYawPitch } from './math.js';
+import { v3, dirFromYawPitch, v3add, v3scale, v3sub, v3norm, v3cross } from './math.js';
 import { RUNWAY } from './terrain.js';
 
 export function parseShot() {
@@ -13,105 +19,206 @@ export function parseShot() {
   return { shot, seed: Number.isFinite(seed) ? seed : 7 };
 }
 
+// Place the player jet at a position/attitude and return its frame.
+function placePlayer(world, pos, yaw, pitch, roll, speed, throttle) {
+  const p = world.player;
+  p.pos = [...pos];
+  p.yaw = yaw;
+  p.pitch = pitch;
+  p.roll = roll;
+  p.speed = speed;
+  p.throttle = throttle;
+  p.onGround = false;
+  p.hp = 100;
+  p.ammo = 600;
+  p.missiles = 8;
+  return p;
+}
+
+// Put one enemy ahead of the player along its forward vector, flying
+// the same way so the camera sees its tail, and lock onto it.
+function placeEnemyAhead(world, index, player, dist, upOffset, sideOffset) {
+  const e = world.enemies[index];
+  if (!e) return null;
+  const fwd = dirFromYawPitch(player.yaw, player.pitch);
+  const right = v3norm(v3cross(fwd, [0, 1, 0]));
+  e.pos = [
+    player.pos[0] + fwd[0] * dist + right[0] * sideOffset,
+    player.pos[1] + fwd[1] * dist + upOffset,
+    player.pos[2] + fwd[2] * dist + right[2] * sideOffset,
+  ];
+  e.yaw = player.yaw;
+  e.pitch = player.pitch;
+  e.roll = 0.25;
+  e.speed = 210;
+  e.alive = true;
+  e.hp = 100;
+  world.lockTarget = e;
+  world.lockTime = world.lockMax;
+  return e;
+}
+
+// A frozen explosion: fire + smoke particles around a point, mid-burst.
+function burstParticles(world, at, big) {
+  const n = big ? 16 : 10;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const r = 4 + (i % 5) * 3;
+    world.particles.push({
+      pos: [at[0] + Math.cos(a) * r, at[1] + Math.sin(a * 2.3) * r * 0.6, at[2] + Math.sin(a) * r],
+      vel: [0, 2, 0], life: 0.35, maxLife: 1.4,
+      size: 5 + (i % 4) * 2.5,
+      colour: i % 3 === 0 ? [0.95, 0.52, 0.14] : [0.85, 0.32, 0.08],
+      smoke: false,
+    });
+  }
+  for (let i = 0; i < 7; i++) {
+    world.particles.push({
+      pos: [at[0] + (i - 3) * 5, at[1] + 6 + i * 2, at[2] + (i % 3 - 1) * 6],
+      vel: [0, 3, 0], life: 0.5, maxLife: 3.0,
+      size: 8 + i * 1.5,
+      colour: [0.25, 0.24, 0.23], smoke: true,
+    });
+  }
+}
+
+// Camera behind and to the side of the player, looking ahead of it.
+function chaseCam(player, back, side, up, ahead) {
+  const fwd = dirFromYawPitch(player.yaw, player.pitch);
+  const right = v3norm(v3cross(fwd, [0, 1, 0]));
+  const pos = [
+    player.pos[0] - fwd[0] * back + right[0] * side,
+    player.pos[1] - fwd[1] * back + up,
+    player.pos[2] - fwd[2] * back + right[2] * side,
+  ];
+  const target = [
+    player.pos[0] + fwd[0] * ahead,
+    player.pos[1] + fwd[1] * ahead,
+    player.pos[2] + fwd[2] * ahead,
+  ];
+  return { pos, target };
+}
+
 // Arrange the world for a named shot. Returns a camera override or null
 // (null = normal chase camera).
 export function applyShot(world, shot, sounds) {
   const p = world.player;
+  world.state = 'flying';
+  world.time = 5;
+  world.message = '';
+  world.messageUntil = 0;
+  world.ring.passed = false;
+  world.bullets = [];
+  world.missiles = [];
+  world.particles = [];
+
   if (shot === 'cover') {
-    // Dogfight mid-action: airborne, banking toward an enemy 250 m ahead
-    // along the player's nose, a missile in flight and an explosion
-    // blooming beside the enemy.
-    world.state = 'flying';
-    p.pos = v3(400, 620, 1800);
-    p.yaw = 2.6; p.pitch = 0.06; p.roll = -0.45;
-    p.speed = 260; p.throttle = 0.9; p.onGround = false;
-    const e = world.enemies[0];
-    e.pos = v3(271, 635, 2014);
-    e.yaw = 2.6; e.pitch = 0; e.alive = true; e.hp = 40;
-    world.lockTarget = e;
-    world.lockTime = 1.5;
+    // Dogfight mid-action: banking behind the locked enemy, missile in
+    // flight, explosion smoke beside it, coast and mountains below.
+    placePlayer(world, [0, 620, -800], -0.15, 0.05, -0.35, 240, 0.9);
+    const e = placeEnemyAhead(world, 0, p, 380, 15, -20);
+    const fwd = dirFromYawPitch(p.yaw, p.pitch);
     world.missiles.push({
-      pos: v3(330, 625, 1900),
-      vel: [-196, 23, 326], target: e, life: 0.4, maxLife: 9,
-      friendly: true, trail: trailLine(v3(330, 625, 1900), v3(392, 620, 1810), 24),
+      pos: [p.pos[0] + fwd[0] * 45, p.pos[1] + fwd[1] * 45, p.pos[2] + fwd[2] * 45],
+      vel: [fwd[0] * 380, fwd[1] * 380, fwd[2] * 380],
+      target: e, life: 0.5, maxLife: 9, friendly: true,
+      trail: Array.from({ length: 12 }, (_, i) => [
+        p.pos[0] + fwd[0] * (45 - i * 4), p.pos[1] + fwd[1] * (45 - i * 4), p.pos[2] + fwd[2] * (45 - i * 4),
+      ]),
     });
-    world.particles.push({
-      pos: v3(300, 642, 2024), vel: [0, 6, 0], life: 0.25, maxLife: 1.4,
-      size: 5, colour: [0.85, 0.32, 0.08], smoke: false,
-    });
-    world.particles.push({
-      pos: v3(312, 656, 2032), vel: [0, 8, 0], life: 0.15, maxLife: 2.6,
-      size: 7, colour: [0.25, 0.24, 0.23], smoke: true,
-    });
-    world.score = 1250;
-    world.kills = 2;
-    return null;
+    p.missiles = 7;
+    const e2 = world.enemies[1];
+    if (e2) {
+      e2.pos = [p.pos[0] + fwd[0] * 520 + 130, p.pos[1] + 60, p.pos[2] + fwd[2] * 520];
+      e2.yaw = p.yaw + 0.8;
+      e2.alive = true;
+      burstParticles(world, e2.pos, true);
+    }
+    return chaseCam(p, 30, 16, 9, 160);
   }
+
   if (shot === 'title') {
-    // Title screen over the airbase: jet parked on the runway, seen from
-    // a low three-quarter angle off the grass to the left — the strip
-    // recedes diagonally, hangars and mountains behind, no dark slab
-    // filling the frame.
+    // Menu over the airbase: the jet sits on the runway, hangars and
+    // the tower behind it, mountains on the horizon.
     world.state = 'menu';
     p.pos = v3(RUNWAY.x, 28, RUNWAY.z);
-    p.yaw = RUNWAY.heading; p.pitch = 0; p.roll = 0;
-    p.speed = 0; p.onGround = true;
+    p.yaw = RUNWAY.heading;
+    p.pitch = 0;
+    p.roll = 0;
+    p.speed = 0;
+    p.throttle = 0.55;
+    p.onGround = true;
     const fwd = dirFromYawPitch(p.yaw, 0);
-    const right = [Math.cos(p.yaw), 0, -Math.sin(p.yaw)];
-    const camPos = [
-      p.pos[0] - fwd[0] * 30 - right[0] * 45,
-      p.pos[1] + 13,
-      p.pos[2] - fwd[2] * 30 - right[2] * 45,
+    const right = v3norm(v3cross(fwd, [0, 1, 0]));
+    const pos = [
+      p.pos[0] - fwd[0] * 42 + right[0] * 30,
+      38,
+      p.pos[2] - fwd[2] * 42 + right[2] * 30,
     ];
-    return { pos: camPos, target: [p.pos[0], p.pos[1] + 14, p.pos[2]], up: [0, 1, 0] };
+    const target = [p.pos[0] + fwd[0] * 25, 30, p.pos[2] + fwd[2] * 25];
+    return { pos, target };
   }
-  if (shot === 'missile') {
-    // Missile launch: player low over the valley, missile just away with a
-    // long smoke trail, enemy 400 m ahead in the lock diamond.
-    world.state = 'flying';
-    p.pos = v3(-900, 480, 2600);
-    p.yaw = 3.4; p.pitch = 0.02; p.roll = 0.18;
-    p.speed = 290; p.throttle = 1; p.onGround = false;
-    const e = world.enemies[1];
-    e.pos = v3(-828, 486, 2870);
-    e.yaw = 3.4; e.alive = true; e.hp = 100;
-    world.lockTarget = e;
-    world.lockTime = 2;
-    // Missile offset to the right of the flight path so it is clearly
-    // visible beside the jet instead of hidden behind it.
-    const from = v3(-909, 481, 2664);
-    world.missiles.push({
-      pos: from,
-      vel: [146, 9, 371], target: e, life: 0.8, maxLife: 9,
-      friendly: true, trail: trailLine(from, v3(-903, 480, 2609), 24),
-    });
-    world.score = 500;
-    world.kills = 1;
-    return null;
-  }
-  if (shot === 'runway') {
-    // Final approach: 380 m out, 80 m above the threshold, the runway
-    // strip and the airbase filling the lower frame, mountains behind.
-    world.state = 'flying';
-    p.pos = v3(RUNWAY.x + 130, 108, RUNWAY.z + 357);
-    p.yaw = RUNWAY.heading; p.pitch = -0.05; p.roll = 0;
-    p.speed = 120; p.throttle = 0.35; p.onGround = false;
-    world.score = 750;
-    world.kills = 1;
-    return null;
-  }
-  return null;
-}
 
-function trailLine(a, b, n) {
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const t = i / (n - 1);
-    out.push([
-      a[0] + (b[0] - a[0]) * t,
-      a[1] + (b[1] - a[1]) * t,
-      a[2] + (b[2] - a[2]) * t,
-    ]);
+  if (shot === 'missile') {
+    // Missile launch: the missile and its smoke trail ahead, the enemy
+    // centred in the lock diamond.
+    placePlayer(world, [0, 700, -400], 0.1, 0.02, 0.1, 260, 1.0);
+    const e = placeEnemyAhead(world, 0, p, 550, 0, 0);
+    const fwd = dirFromYawPitch(p.yaw, p.pitch);
+    world.missiles.push({
+      pos: [p.pos[0] + fwd[0] * 32, p.pos[1] + fwd[1] * 32, p.pos[2] + fwd[2] * 32],
+      vel: [fwd[0] * 380, fwd[1] * 380, fwd[2] * 380],
+      target: e, life: 0.25, maxLife: 9, friendly: true,
+      trail: Array.from({ length: 10 }, (_, i) => [
+        p.pos[0] + fwd[0] * (32 - i * 3.5), p.pos[1] + fwd[1] * (32 - i * 3.5), p.pos[2] + fwd[2] * (32 - i * 3.5),
+      ]),
+    });
+    p.missiles = 7;
+    return chaseCam(p, 28, -8, 7, 200);
   }
-  return out;
+
+  if (shot === 'runway') {
+    // Final approach: the runway strip ahead, hangars and tower beside
+    // it, mountains behind.
+    const fwd = dirFromYawPitch(RUNWAY.heading, 0);
+    const pos = [
+      RUNWAY.x - fwd[0] * 900,
+      160,
+      RUNWAY.z - fwd[2] * 900,
+    ];
+    placePlayer(world, pos, RUNWAY.heading, -0.06, 0, 150, 0.5);
+    return chaseCam(p, 34, 6, 9, 180);
+  }
+
+  if (shot === 'ring') {
+    // The gold target ring, dead ahead: the player flies straight at
+    // it through the valley, its light beacon rising through it, an
+    // enemy banking just beyond it. This is the shot that proves the
+    // ring is visible in-game.
+    placePlayer(world, [-600, 405, -2320], 0, 0.03, 0.08, 220, 0.85);
+    const e = world.enemies[0];
+    if (e) {
+      e.pos = [-380, 470, -2760];
+      e.yaw = 0.5;
+      e.pitch = 0;
+      e.roll = -0.5;
+      e.speed = 210;
+      e.alive = true;
+      e.hp = 100;
+    }
+    const e2 = world.enemies[1];
+    if (e2) {
+      e2.pos = [-820, 500, -2900];
+      e2.yaw = -0.4;
+      e2.alive = true;
+    }
+    world.lockTarget = null;
+    world.lockTime = 0;
+    return {
+      pos: [-588, 418, -2288],
+      target: [-600, 420, -2600],
+    };
+  }
+
+  return null;
 }
