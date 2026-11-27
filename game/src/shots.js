@@ -122,8 +122,8 @@ export function applyShot(world, shot, sounds) {
       pos: [p.pos[0] + fwd[0] * 45, p.pos[1] + fwd[1] * 45, p.pos[2] + fwd[2] * 45],
       vel: [fwd[0] * 380, fwd[1] * 380, fwd[2] * 380],
       target: e, life: 0.5, maxLife: 9, friendly: true,
-      trail: Array.from({ length: 12 }, (_, i) => [
-        p.pos[0] + fwd[0] * (45 - i * 4), p.pos[1] + fwd[1] * (45 - i * 4), p.pos[2] + fwd[2] * (45 - i * 4),
+      trail: Array.from({ length: 14 }, (_, i) => [
+        p.pos[0] + fwd[0] * (45 - i * 3.2), p.pos[1] + fwd[1] * (45 - i * 3.2), p.pos[2] + fwd[2] * (45 - i * 3.2),
       ]),
     });
     p.missiles = 7;
@@ -150,10 +150,12 @@ export function applyShot(world, shot, sounds) {
     p.onGround = true;
     const fwd = dirFromYawPitch(p.yaw, 0);
     const right = v3norm(v3cross(fwd, [0, 1, 0]));
+    // Three-quarter rear view: far enough to the side that the jet's
+    // length shows instead of foreshortening to a stub.
     const pos = [
-      p.pos[0] - fwd[0] * 42 + right[0] * 30,
-      38,
-      p.pos[2] - fwd[2] * 42 + right[2] * 30,
+      p.pos[0] - fwd[0] * 30 + right[0] * 45,
+      40,
+      p.pos[2] - fwd[2] * 30 + right[2] * 45,
     ];
     const target = [p.pos[0] + fwd[0] * 25, 30, p.pos[2] + fwd[2] * 25];
     return { pos, target };
@@ -165,16 +167,19 @@ export function applyShot(world, shot, sounds) {
     placePlayer(world, [0, 700, -400], 0.1, 0.02, 0.1, 260, 1.0);
     const e = placeEnemyAhead(world, 0, p, 550, 0, 0);
     const fwd = dirFromYawPitch(p.yaw, p.pitch);
+    // The missile rides 28 m ahead of the player with a 14-point trail
+    // that ends at the jet's nose — never behind the player, or the
+    // ribbon's tail would swing past the camera and fill the frame.
     world.missiles.push({
-      pos: [p.pos[0] + fwd[0] * 32, p.pos[1] + fwd[1] * 32, p.pos[2] + fwd[2] * 32],
+      pos: [p.pos[0] + fwd[0] * 28, p.pos[1] + fwd[1] * 28, p.pos[2] + fwd[2] * 28],
       vel: [fwd[0] * 380, fwd[1] * 380, fwd[2] * 380],
       target: e, life: 0.25, maxLife: 9, friendly: true,
-      trail: Array.from({ length: 10 }, (_, i) => [
-        p.pos[0] + fwd[0] * (32 - i * 3.5), p.pos[1] + fwd[1] * (32 - i * 3.5), p.pos[2] + fwd[2] * (32 - i * 3.5),
+      trail: Array.from({ length: 14 }, (_, i) => [
+        p.pos[0] + fwd[0] * (28 - i * 1.9), p.pos[1] + fwd[1] * (28 - i * 1.9), p.pos[2] + fwd[2] * (28 - i * 1.9),
       ]),
     });
     p.missiles = 7;
-    return chaseCam(p, 28, -8, 7, 200);
+    return chaseCam(p, 22, -6, 6, 200);
   }
 
   if (shot === 'runway') {
